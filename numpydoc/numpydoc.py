@@ -28,11 +28,12 @@ from copy import deepcopy
 from docutils.nodes import Text, citation, comment, inline, reference, section
 from sphinx.addnodes import desc_content, pending_xref
 from sphinx.util import logging
+from sphinx_autodoc_typehints import get_all_type_hints, format_annotation
 
 from . import __version__
 from .docscrape_sphinx import get_doc_object
 from .validate import get_validation_checks, validate
-from .xref import DEFAULT_LINKS
+from .xref import DEFAULT_LINKS, make_xref
 
 logger = logging.getLogger(__name__)
 
@@ -233,6 +234,37 @@ def mangle_docstrings(app, what, name, obj, options, lines):
     # call function to replace reference numbers so that there are no
     # duplicates
     rename_references(app, what, name, obj, options, lines)
+
+    # taken from https://github.com/tox-dev/sphinx-autodoc-typehints/blob/41b290030643d971a97af1504943fc792814be8c/src/sphinx_autodoc_typehints/__init__.py#L637
+    # to be able to call get_all_type_hints
+    typehints_obj = obj.fget if isinstance(obj, property) else obj
+    type_hints = {}
+    if callable(typehints_obj):
+        typehints_obj = typehints_obj.__init__ if inspect.isclass(typehints_obj) else typehints_obj
+        typehints_obj = inspect.unwrap(typehints_obj)
+        type_hints = get_all_type_hints(app.config.autodoc_mock_imports, typehints_obj, name)
+
+    # actual modifications
+    check_params = False
+    for i, line in enumerate(lines):  # loop over lines and append them with type info
+        # this works over the processed docstring, so headings are :Parameters:,
+        # :Returns:, .. rubric:: Examples and the like.
+        # It might need better checking of what is a parameter, for now only two
+        # conditions are needed, we have already seen the heading and we find the
+        # same exact parameter name in the docstring bolded
+        if line.startswith(":Parameters:"):  # Other parameters missing
+            check_params = True
+        # turn off checking for parameters when we find a different section
+        # see also and other sections might not check this
+        # it might also make sense to move returns/yields/... above
+        if line.startswith(".. rubric::") or line.startswith(":Returns:"):  
+            check_params = False
+        if check_params:
+            for param in type_hints:
+                if f"**{param}**" == line.strip():
+                    # append the type information to the name+type+default line
+                    lines[i] = line + " : " + format_annotation(type_hints[param], app.config)
+                    break
 
     lines += ["..", DEDUPLICATION_TAG]
 
